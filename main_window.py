@@ -29,7 +29,7 @@ from PySide6.QtWidgets import (
 from config import (
     COLORS as C, PROTOCOL, TEST_DEFAULTS, TEST_RANGES,
     SERIAL_DEFAULTS, DEVICE_IDENTIFICATION as DEVID,
-    TEST_RUNTIME,
+    TEST_RUNTIME,STOP_COMMAND,
 )
 from serial_worker import (
     SerialWorker, build_leak_test_command,
@@ -1126,7 +1126,7 @@ class MainWindow(QMainWindow):
         self._batch_dialog = BatchTestDialog(self._collect_params(), self)
         self._batch_dialog.batch_started.connect(self._on_batch_started)
         self._batch_dialog.batch_stop_requested.connect(
-            self._on_batch_stop_requested)
+            self._on_batch_stop_from_dialog)
         self._batch_dialog.clear_chart_requested.connect(
             self._on_clear_chart_from_batch)
         self._batch_dialog.finished.connect(self._on_batch_closed)
@@ -1231,6 +1231,42 @@ class MainWindow(QMainWindow):
         # 批量结束后自动保存结果 + 关闭日志流
         self._auto_save_batch()
         self._close_log_stream()
+
+    # ══════════════════════════════════════════════════════════════
+    # 批量窗口"停止"按钮专用
+    # ══════════════════════════════════════════════════════════════
+    def _on_batch_stop_from_dialog(self):
+        """批量窗口点"停止"：先中止批量，再按 STOP_COMMAND 发命令"""
+        if not self._in_batch:
+            return
+        self._on_batch_stop_requested()
+        self._send_stop_command("批量测试已停止")
+
+    def _send_stop_command(self, reason: str = "") -> bool:
+        """
+        按 config.STOP_COMMAND 决定发什么命令：
+          "disconnect" → 00（退出PC，设备回待机）
+          "reset"      → 01（复位，设备保持 PC 就绪）
+          "none"       → 不发
+        """
+        if self._use_simulation or not self._serial_ready:
+            return False
+
+        suffix = f"（{reason}）" if reason else ""
+
+        if STOP_COMMAND == "none":
+            self._log(f"■ 停止（未发命令）{suffix}")
+            return False
+
+        if STOP_COMMAND == "reset":
+            self._log(f"■ 发送：复位 (01 00 00 00 00 00 00 00){suffix}")
+            self.worker.send(build_reset())
+            return True
+
+        # 默认：disconnect
+        self._log(f"■ 发送：退出PC (00 00 00 00 00 00 00 00){suffix}")
+        self.worker.send(build_disconnect())
+        return True
 
     def _on_batch_stop_requested(self):
         if not self._in_batch:
