@@ -8,6 +8,7 @@ main_window.py — 主界面
   · 帧分发（曲线、进度、状态、日志）
   · 硬件收尾（退出PC / 断开串口）
   · 自动保存结果 / 日志（report_manager）
+  · 实时日志流（缓冲 + 定时 flush）
 
 批量相关的 UI 与生命周期编排在 batch_test_dialog.py。
 """
@@ -151,6 +152,15 @@ class MainWindow(QMainWindow):
         self._test_log_start_block  = 0
         self._batch_start_dt        = None
         self._batch_log_start_block = 0
+
+        # 实时日志流（缓冲 + 定时 flush）
+        self._log_stream      = None      # 文件句柄
+        self._log_path        = None      # 文件路径
+        self._log_buffer      = []        # 待写缓冲
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(
+            TEST_RUNTIME.get("log_flush_ms", 2000))
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
 
         # 串口
         self.worker = SerialWorker(self)
@@ -526,6 +536,53 @@ class MainWindow(QMainWindow):
         self.lbl_elapsed.setText(f"{elapsed:.1f} s")
 
     # ══════════════════════════════════════════════════════════════
+    # 实时日志流（缓冲 + 定时 flush）
+    # ══════════════════════════════════════════════════════════════
+    def _open_log_stream(self, is_batch: bool, params: dict = None):
+        """打开日志文件流；启动定时 flush"""
+        self._close_log_stream()          # 保险：先关旧的
+        try:
+            if is_batch:
+                fh, path = report_manager.open_batch_log_stream(
+                    self._batch_start_dt)
+            else:
+                fh, path = report_manager.open_single_log_stream(
+                    self._test_start_dt,
+                    int(params["pressure"]),
+                    int(params["duration"]))
+            self._log_stream = fh
+            self._log_path   = path
+            self._log_buffer.clear()
+            self._log_flush_timer.start()
+        except Exception as e:
+            self._log_stream = None
+            self._log_path   = None
+            self._log(f"⚠ 日志文件打开失败：{e}")
+
+    def _close_log_stream(self):
+        """刷新缓冲、关闭日志文件流"""
+        self._log_flush_timer.stop()
+        self._flush_log_buffer()
+        if self._log_stream is not None:
+            try:
+                self._log_stream.close()
+            except Exception:
+                pass
+        self._log_stream = None
+        self._log_path   = None
+
+    def _flush_log_buffer(self):
+        """把缓冲中的日志批量写入磁盘"""
+        if self._log_stream is None or not self._log_buffer:
+            return
+        try:
+            self._log_stream.write("\n".join(self._log_buffer) + "\n")
+            self._log_stream.flush()
+            self._log_buffer.clear()
+        except Exception:
+            pass
+
+    # ══════════════════════════════════════════════════════════════
     # 状态机
     # ══════════════════════════════════════════════════════════════
     def _classify_stage(self, frame: dict) -> str:
@@ -603,6 +660,10 @@ class MainWindow(QMainWindow):
 
     def _do_start(self):
         params = self._collect_params()
+        # ★ 提前记录时间戳并打开日志流（覆盖复位序列日志）
+        self._test_start_dt = datetime.now()
+        self._open_log_stream(is_batch=False, params=params)
+
         if self._use_simulation:
             self.worker.start_simulation(params["pressure"], params["duration"])
             self._start_test_run(params)
@@ -649,8 +710,7 @@ class MainWindow(QMainWindow):
         self._threshold      = threshold
         self._chart_seen_pressure = False
 
-        # 记录测试开始时刻 / 日志起点
-        self._test_start_dt        = datetime.now()
+        # 记录日志起点（新方案由流直接写文件，此处保留兼容）
         self._test_log_start_block = self.log_view.blockCount()
 
         self._stage           = STAGE_INFLATING
@@ -799,12 +859,13 @@ class MainWindow(QMainWindow):
         # 单次测试（非批量）完成后自动保存
         if not self._in_batch:
             self._auto_save_single()
+            self._close_log_stream()
 
     # ══════════════════════════════════════════════════════════════
-    # 自动保存
+    # 自动保存（结果 CSV）
     # ══════════════════════════════════════════════════════════════
     def _auto_save_single(self):
-        """测试完成后自动写入结果 CSV + 日志 LOG"""
+        """测试完成后自动写入结果 CSV（日志已由流实时写入）"""
         if self._test_start_dt is None:
             return
         try:
@@ -823,20 +884,14 @@ class MainWindow(QMainWindow):
                 self._total_time,
                 qualified,
             )
-            log_text = self._get_log_since(self._test_log_start_block)
-            log_path = report_manager.save_single_log(
-                self._test_start_dt,
-                int(self._target_pressure),
-                int(self._duration),
-                log_text,
-            )
             self._log(f"✔ 结果已保存：{os.path.basename(result_path)}")
-            self._log(f"✔ 日志已保存：{os.path.basename(log_path)}")
+            if self._log_path:
+                self._log(f"✔ 日志已保存：{os.path.basename(self._log_path)}")
         except Exception as e:
             self._log(f"✘ 自动保存失败：{e}")
 
     def _auto_save_batch(self):
-        """批量结束后自动写入结果 CSV + 日志 LOG"""
+        """批量结束后自动写入结果 CSV（日志已由流实时写入）"""
         if self._batch_start_dt is None or self._batch_dialog is None:
             return
         try:
@@ -861,25 +916,11 @@ class MainWindow(QMainWindow):
             result_path = report_manager.save_batch_result(
                 self._batch_start_dt, plan_rows, result_rows)
 
-            log_text = self._get_log_since(self._batch_log_start_block)
-            log_path = report_manager.save_batch_log(
-                self._batch_start_dt, log_text)
-
             self._log(f"✔ 结果已保存：{os.path.basename(result_path)}")
-            self._log(f"✔ 日志已保存：{os.path.basename(log_path)}")
+            if self._log_path:
+                self._log(f"✔ 日志已保存：{os.path.basename(self._log_path)}")
         except Exception as e:
             self._log(f"✘ 自动保存失败：{e}")
-
-    def _get_log_since(self, start_block: int) -> str:
-        """取 log_view 从 start_block 起的所有文本"""
-        doc = self.log_view.document()
-        end_block = doc.blockCount()
-        if end_block <= start_block:
-            return ""
-        return "\n".join(
-            doc.findBlockByNumber(i).text()
-            for i in range(start_block, end_block)
-        )
 
     # ══════════════════════════════════════════════════════════════
     # 硬件收尾
@@ -945,6 +986,7 @@ class MainWindow(QMainWindow):
         self.lbl_live_leak.setText("—")
         self._set_badge("idle", "已停止")
         self._log(f"■ {reason}")
+        self._close_log_stream()
 
     def _reset(self, keep_chart: bool = False):
         self.res_pressure.setText("—")
@@ -1115,6 +1157,9 @@ class MainWindow(QMainWindow):
         self._batch_start_dt        = datetime.now()
         self._batch_log_start_block = self.log_view.blockCount()
 
+        # ★ 打开批量日志流
+        self._open_log_stream(is_batch=True)
+
         if not self._ensure_device("batch"):
             self._pending_batch_plan = (plan, options)
             return
@@ -1183,8 +1228,9 @@ class MainWindow(QMainWindow):
         if self._batch_dialog and self._batch_dialog.isVisible():
             self._batch_dialog.notify_batch_finished(reason)
 
-        # 批量结束后自动保存结果 + 日志
+        # 批量结束后自动保存结果 + 关闭日志流
         self._auto_save_batch()
+        self._close_log_stream()
 
     def _on_batch_stop_requested(self):
         if not self._in_batch:
@@ -1222,11 +1268,15 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════
     def _log(self, msg: str):
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{ts}]  {msg}")
+        line = f"[{ts}]  {msg}"
+        self.log_view.appendPlainText(line)
+        if self._log_stream is not None:
+            self._log_buffer.append(line)
 
     def closeEvent(self, event):
         try:
             self._pending_test_params = None
+            self._close_log_stream()          # ★ 关闭日志流
             if self._in_batch:
                 self._on_batch_stop_requested()
             self._shutdown_hardware("关闭窗口")

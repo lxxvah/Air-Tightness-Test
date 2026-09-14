@@ -27,7 +27,7 @@ _ABOUT_HTML = f"""
     {APP_NAME} · {APP_VERSION}
 </h2>
 <p style="margin:0 0 18px 0; color:{C['body_mid']}; font-size:13px;">
-    配合 JJG692-2010 气密性测试仪使用，用于气密性测量的参数配置、实时监控与结果记录。
+    配合有 JJG692-2010 标准的气密性测试仪使用，用于气密性测量的参数配置、实时监控与结果记录。
 </p>
 
 <h3 style="margin:0 0 6px 0; color:{C['ink']}; font-size:15px;">功能介绍</h3>

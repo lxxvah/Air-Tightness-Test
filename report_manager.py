@@ -19,6 +19,10 @@ report_manager.py — 日志 / 测试结果的集中管理
 编码：
   CSV → utf-8-sig（Excel 打开无乱码）
   LOG → utf-8
+
+日志写入策略：
+  · open_single_log_stream / open_batch_log_stream 返回已打开的
+    文件句柄，由 main_window 边跑边写（缓冲 + 定时 flush）
 """
 
 import csv
@@ -92,12 +96,24 @@ def save_single_result(dt_start, pressure, duration, threshold, cuff_name,
 
 
 def save_single_log(dt_start, pressure, duration, log_text) -> str:
+    """（兼容旧接口）一次性写入整段日志文本"""
     _, l = _ensure_dirs()
     fn = f"单次_{pressure}xmmHg_{duration}s_{format_timestamp(dt_start)}.log"
     path = os.path.join(l, fn)
     with open(path, "w", encoding="utf-8") as f:
         f.write(log_text)
     return path
+
+
+def open_single_log_stream(dt_start, pressure, duration):
+    """
+    打开单次测试日志文件，返回 (file_handle, path)。
+    调用方负责写内容并关闭（推荐配合定时 flush 使用）。
+    """
+    _, l = _ensure_dirs()
+    fn = f"单次_{pressure}xmmHg_{duration}s_{format_timestamp(dt_start)}.log"
+    path = os.path.join(l, fn)
+    return open(path, "w", encoding="utf-8"), path
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -138,12 +154,23 @@ def save_batch_result(dt_start, plan_rows, result_rows) -> str:
 
 
 def save_batch_log(dt_start, log_text) -> str:
+    """（兼容旧接口）一次性写入整段日志文本"""
     _, l = _ensure_dirs()
     fn = f"批量_{format_timestamp(dt_start)}.log"
     path = os.path.join(l, fn)
     with open(path, "w", encoding="utf-8") as f:
         f.write(log_text)
     return path
+
+
+def open_batch_log_stream(dt_start):
+    """
+    打开批量测试日志文件，返回 (file_handle, path)。
+    """
+    _, l = _ensure_dirs()
+    fn = f"批量_{format_timestamp(dt_start)}.log"
+    path = os.path.join(l, fn)
+    return open(path, "w", encoding="utf-8"), path
 
 
 # ═══════════════════════════════════════════════════════════════
